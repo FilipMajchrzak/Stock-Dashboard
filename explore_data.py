@@ -112,3 +112,29 @@ for ticker in tickers:
     
     plt.tight_layout()
     plt.show()
+
+#Bollinger bands = moving average ± (standard deviation * n)
+
+def calculate_bollinger_bands(close_prices, window=20, num_std=2):
+    middle_band = close_prices.rolling(window=window).mean()
+    std_dev = close_prices.rolling(window=window).std()
+    
+    upper_band = middle_band + (num_std * std_dev)
+    lower_band = middle_band - (num_std * std_dev)
+    
+    return upper_band, middle_band, lower_band
+for ticker in tickers:
+    close_prices = data['Close'][ticker]
+    upper_band, middle_band, lower_band = calculate_bollinger_bands(close_prices)
+    
+    plt.figure(figsize=(14, 7))
+    plt.plot(close_prices, label=f'{ticker} Close Price', color='blue')
+    plt.plot(upper_band, label='Upper Bollinger Band', color='red', linestyle='--')
+    plt.plot(middle_band, label='Middle Bollinger Band', color='green', linestyle='--')
+    plt.plot(lower_band, label='Lower Bollinger Band', color='orange', linestyle='--')
+    
+    plt.title(f'{ticker} Bollinger Bands')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+    plt.show()
