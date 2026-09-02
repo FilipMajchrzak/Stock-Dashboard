@@ -69,3 +69,46 @@ for ticker in tickers:
     plt.ylabel('Price')
     plt.legend()
     plt.show()
+
+#RSI = 100 - (100 / (1 + RS))
+#RS = Average Gain / Average Loss over n days
+
+def calculate_rsi(close_prices, window=14):
+    delta = close_prices.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=window).mean()
+    avg_loss = loss.rolling(window=window).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+#Calculate RSI for each stock
+all_rsi = {}
+for ticker in tickers:
+    close_prices = data['Close'][ticker]
+    all_rsi[ticker] = calculate_rsi(close_prices)
+    print(f"{ticker} RSI:\n", all_rsi[ticker].tail(5))
+
+
+#plot RSI and closing prices for each ticker
+for ticker in tickers:
+    plt.figure(figsize=(14, 7))
+    plt.subplot(2, 1, 1)
+    plt.plot(data['Close'][ticker], label=f'{ticker} Close Price', color='blue')
+    plt.title(f'{ticker} Stock Price')
+    plt.xlabel('Date')
+    plt.ylabel('Price')
+    plt.legend()
+
+    plt.subplot(2, 1, 2)
+    plt.plot(all_rsi[ticker], label=f'{ticker} RSI', color='orange')
+    plt.axhline(70, color='red', linestyle='--', label='Overbought (70)')
+    plt.axhline(30, color='green', linestyle='--', label='Oversold (30)')
+    plt.title(f'{ticker} Relative Strength Index (RSI)')
+    plt.xlabel('Date')
+    plt.ylabel('RSI')
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.show()
