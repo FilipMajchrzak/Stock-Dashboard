@@ -1,0 +1,217 @@
+#DCF code = value of investment today based on predicted future income
+#Import Libraries
+import pandas as pd
+import numpy as np
+from yahooquery import Ticker
+import yfinance as yf
+
+pd.set_option('display.max_rows', None)
+symbol = 'AAPL'
+stock = Ticker(symbol)
+
+# ---- Historic Free Cash Flow (yahooquery) ----
+df_cash = pd.DataFrame(stock.cash_flow())
+df_cash['asOfDate'] = pd.to_datetime(df_cash['asOfDate'])
+df_cash.set_index('asOfDate', inplace=True)
+df_cash = df_cash.iloc[:, 2:]
+print(df_cash)
+print(df_cash['FreeCashFlow'])
+
+# ---- Historic Net Debt (yahooquery) ----
+df_balance = pd.DataFrame(stock.balance_sheet())
+print(df_balance)
+df_balance['asOfDate'] = pd.to_datetime(df_balance['asOfDate'])
+df_balance.set_index('asOfDate', inplace=True)
+df_balance = df_balance.iloc[:, 2:]
+
+net_debt = df_balance['NetDebt'].iloc[-1]
+print(net_debt)
+
+# ---- Column to List helper ----
+def column_to_list(df, column_name):
+    data_list = df[column_name].tolist()
+    return [x for x in data_list if pd.notnull(x)]
+
+historic_fcf = column_to_list(df_cash, 'FreeCashFlow')
+print(historic_fcf)
+
+# ---- Average FCF growth rate + 5yr forecast ----
+fcf_avg_growth_rate = np.mean([
+    (historic_fcf[i] - historic_fcf[i-1]) / historic_fcf[i-1]
+    for i in range(1, len(historic_fcf))
+])
+print(fcf_avg_growth_rate)
+
+future_year = 5
+future_fcf = [historic_fcf[-1] * (1 + fcf_avg_growth_rate) ** (i + 1) for i in range(future_year)]
+future_fcf = [float(x) for x in future_fcf]
+print(future_fcf)
+
+# ---- Shares outstanding (yfinance) ----
+ticker = yf.Ticker(symbol)
+info = ticker.info
+
+shares_outstanding_number = info.get("sharesOutstanding")
+print(f"Shares Outstanding (as number): {shares_outstanding_number}")
+
+# ---- WACC = (E/V * Re) + ((D/V * Rd) * (1 - Tc)) ----
+
+# Market value of equity (E)
+current_stock_price = info.get("currentPrice")
+market_value_of_equity = shares_outstanding_number * current_stock_price
+print(f"Market Value of Equity (E): {market_value_of_equity}")
+
+# Market value of debt (D) = Net Debt
+market_value_of_debt = net_debt
+print(f"Market Value of Debt (D): {market_value_of_debt}")
+
+# Total market value (V)
+total_market_value = market_value_of_equity + market_value_of_debt
+print(f"Total Market Value (V): {total_market_value}")
+
+# Cost of equity (Re) = Risk-free rate + Beta * (Market return - Risk-free rate)
+tnx = yf.Ticker("^TNX").history(period="1d")['Close'].iloc[-1]
+risk_free_rate = tnx / 100
+print(f"Risk-free Rate: {risk_free_rate}")
+
+spx = yf.Ticker("^GSPC").history(period="5y")['Close']
+market_return = (spx.iloc[-1] / spx.iloc[0]) ** (1 / 5) - 1
+print(f"Market Return: {market_return}")
+
+apple_beta = info.get("beta")
+print(f"Apple's Beta: {apple_beta}")
+
+cost_of_equity = risk_free_rate + apple_beta * (market_return - risk_free_rate)
+print(f"Cost of Equity (Re): {cost_of_equity}")
+
+# ---- Cost of debt (Rd) + tax rate (Tc) ----
+income = ticker.income_stmt.iloc[:, 0]     # most recent annual period, indexed by line item
+balance = ticker.balance_sheet.iloc[:, 0]
+
+def first_available(series, candidates, default=0):
+    """Return the value of the first matching, non-NaN row name found in the series."""
+    for name in candidates:
+        if name in series.index and pd.notnull(series[name]):
+            return series[name]
+    return default
+
+# Total debt
+total_debt = first_available(balance, ["Total Debt"])
+if not total_debt:
+    total_debt = (
+        first_available(balance, ["Long Term Debt"])
+        + first_available(balance, ["Current Debt"])
+    )
+print("Total Debt:", total_debt)
+
+# Interest expense -> cost of debt
+# Apple doesn't disaggregate interest expense in its reported income statement,
+# so yfinance has no usable field for it. As a simplifying assumption, approximate
+# cost of debt as risk-free rate + a small credit spread for a high-grade issuer.
+interest_expense = first_available(income, ["Interest Expense", "Interest Expense Non Operating"])
+if not interest_expense:
+    quarterly_income = ticker.quarterly_income_stmt
+    for name in ["Interest Expense", "Interest Expense Non Operating"]:
+        if name in quarterly_income.index:
+            interest_expense = quarterly_income.loc[name].iloc[:4].sum()
+            break
+
+if interest_expense and total_debt:
+    cost_of_debt = interest_expense / total_debt
+    print("Cost of Debt:", cost_of_debt)
+else:
+    credit_spread = 0.0075  # 75bps, reasonable proxy for a AA+-rated company
+    cost_of_debt = risk_free_rate + credit_spread
+    print(f"Interest expense not available in data — using proxy Cost of Debt: {cost_of_debt}")
+
+# Effective corporate tax rate (Tc) = Income Tax Expense / Pre-Tax Income
+income_tax_expense = first_available(income, ["Tax Provision"])
+pre_tax_income = first_available(income, ["Pretax Income"])
+print("Income Tax Expense:", income_tax_expense)
+print("Pre-Tax Income:", pre_tax_income)
+
+if pre_tax_income:
+    corporate_tax_rate = income_tax_expense / pre_tax_income
+else:
+    corporate_tax_rate = 0
+    print("Warning: pre_tax_income is 0, corporate_tax_rate set to 0")
+print("Corporate Tax Rate:", corporate_tax_rate)
+
+# ---- Final WACC ----
+E, D, V = market_value_of_equity, market_value_of_debt, total_market_value
+wacc = (E / V * cost_of_equity) + (D / V * cost_of_debt * (1 - corporate_tax_rate))
+print(f"WACC: {wacc}")
+
+# ---- Discount forecasted FCF back to present value ----
+discounted_fcf = [
+    fcf / (1 + wacc) ** (i + 1)
+    for i, fcf in enumerate(future_fcf)
+]
+print(f"Discounted FCF: {discounted_fcf}")
+
+sum_discounted_fcf = sum(discounted_fcf)
+print(f"Sum of Discounted FCF (Years 1-5): {sum_discounted_fcf}")
+
+# ---- Terminal Value (Gordon Growth Model) ----
+# Assumes FCF grows at a modest perpetual rate beyond year 5.
+# Perpetual growth must be lower than WACC or the formula breaks (negative/undefined).
+terminal_growth_rate = 0.025  # ~long-run GDP/inflation-linked growth, standard conservative assumption
+terminal_value = (future_fcf[-1] * (1 + terminal_growth_rate)) / (wacc - terminal_growth_rate)
+discounted_terminal_value = terminal_value / (1 + wacc) ** future_year
+print(f"Terminal Value: {terminal_value}")
+print(f"Discounted Terminal Value: {discounted_terminal_value}")
+
+# ---- Enterprise Value -> Equity Value -> Per-Share Value ----
+enterprise_value = sum_discounted_fcf + discounted_terminal_value
+print(f"Enterprise Value: {enterprise_value}")
+
+equity_value = enterprise_value - net_debt
+print(f"Equity Value: {equity_value}")
+
+intrinsic_value_per_share = equity_value / shares_outstanding_number
+print(f"Intrinsic Value per Share: {intrinsic_value_per_share}")
+print(f"Current Market Price: {current_stock_price}")
+
+if intrinsic_value_per_share > current_stock_price:
+    print("Model suggests the stock may be UNDERVALUED.")
+else:
+    print("Model suggests the stock may be OVERVALUED.")
+
+# ---- Sensitivity Analysis: Intrinsic Value across WACC & Terminal Growth assumptions ----
+# DCF outputs are highly sensitive to these two assumptions, so instead of relying
+# on a single point estimate, we recompute intrinsic value across a small grid.
+
+wacc_range = [wacc - 0.02, wacc - 0.01, wacc, wacc + 0.01, wacc + 0.02]
+growth_range = [0.015, 0.02, 0.025, 0.03, 0.035]
+
+def calculate_intrinsic_value(wacc_input, growth_input, future_fcf, net_debt, shares_outstanding_number):
+    """Recompute intrinsic value per share for a given WACC and terminal growth rate."""
+    discounted = [fcf / (1 + wacc_input) ** (i + 1) for i, fcf in enumerate(future_fcf)]
+    sum_discounted = sum(discounted)
+
+    tv = (future_fcf[-1] * (1 + growth_input)) / (wacc_input - growth_input)
+    discounted_tv = tv / (1 + wacc_input) ** len(future_fcf)
+
+    ev = sum_discounted + discounted_tv
+    equity_val = ev - net_debt
+    return equity_val / shares_outstanding_number
+
+# Build the sensitivity table
+sensitivity_table = pd.DataFrame(
+    index=[f"{w:.2%}" for w in wacc_range],
+    columns=[f"{g:.2%}" for g in growth_range]
+)
+
+for w in wacc_range:
+    for g in growth_range:
+        if w <= g:
+            # Terminal value formula breaks down (or goes negative) if growth >= WACC
+            value = None
+        else:
+            value = calculate_intrinsic_value(w, g, future_fcf, net_debt, shares_outstanding_number)
+        sensitivity_table.loc[f"{w:.2%}", f"{g:.2%}"] = round(value, 2) if value is not None else "N/A"
+
+sensitivity_table.index.name = "WACC \\ Terminal Growth"
+print("\nSensitivity Analysis: Intrinsic Value per Share")
+print(sensitivity_table)
+print(f"\nFor reference, current market price: {current_stock_price}")
